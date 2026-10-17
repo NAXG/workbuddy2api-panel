@@ -644,15 +644,19 @@ type Client struct {
 	// （仅当 client_name 非空）。
 	UserAgent string
 
+	// DeviceProfile 单设备（host）身份档案：machineId / sessionId / OS / 硬件。
+	// 一台机器多账号时所有账号共享，见 device.go 与 data/device.json。
+	DeviceProfile *DeviceProfile
+
 	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + X-IDE-Version）。
-	// 空 = 内置默认（对齐官方 5.5.4 分发包）。
+	// 空 = 内置默认（对齐本机 WorkBuddy 5.8.3）。
 	ClientVersion string
 
-	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（随包 CLI 2.161.0）。
 	CliVersion string
 
-	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
-	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
+	// ClientName 用量归属名（X-IDE-Name / X-IDE-Type；空 = WorkBuddy）。
+	// X-Product 恒为部署形态 SaaS；显式 "SaaS" 保留最小头组（仅 X-Product）。
 	ClientName string
 
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。
@@ -694,6 +698,7 @@ func New() *Client {
 		ChatBaseCN:    "https://copilot.tencent.com",
 		BillingBaseCN: "https://www.codebuddy.cn",
 		WebBaseCN:     "https://www.workbuddy.cn",
+		DeviceProfile: DefaultDeviceProfile(),
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：
 		// CN 账号恒判 cn，global base 只在 realm=global 的账号上被使用）。
 		GlobalEnabled: true,

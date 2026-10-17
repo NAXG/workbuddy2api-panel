@@ -1,11 +1,11 @@
-// desktop.go 桌面客户端（WorkBuddy Desktop 5.5.6）行为指纹上报。
+// desktop.go 桌面客户端（WorkBuddy Desktop 5.8.3）行为指纹上报。
 //
 // 来源：2026-09-12 Sunny 抓包实测（data/desktop-task-protocol.md）。桌面端点亮
 // 「需电脑端」类任务的关键不是独立端点，而是同一 POST /v2/report 通道上
 // **不同的客户端指纹**：
 //
 //	POST https://copilot.tencent.com/v2/report        ← chatBase（CLI 上报走 billingBase）
-//	User-Agent: WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1
+//	User-Agent: WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0
 //	X-Domain: copilot.tencent.com, X-Product: SaaS, X-User-Id: <uid>
 //	Body: [ {...event...} ]                           ← 数组
 //
@@ -23,8 +23,6 @@ package upstream
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,28 +37,22 @@ import (
 const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
-	// desktopUA 实测桌面客户端 UA（5.5.6 内嵌 CLI 2.137.1）。
-	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
 )
 
 // desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
 
-// deriveID 由 uid 稳定派生一个 36 位 hex 设备标识（machineId/qimei36 复用），
-// 幂等：同一账号每次生成相同值，模拟固定设备。
-func deriveID(a *auth.Auth, salt string) string {
-	sum := sha256.Sum256([]byte(salt + ":" + a.UID))
-	return hex.EncodeToString(sum[:18]) // 36 hex chars
-}
-
 // DesktopEvent 桌面端事件：业务字段任意（map），公共指纹由 ReportDesktopEvent 注入。
 type DesktopEvent map[string]any
 
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
-func desktopFingerprint(a *auth.Auth) map[string]any {
+// machineId/sessionId/OS/硬件来自单设备档案（data/device.json），一台机器上的
+// 所有账号共享；版本跟随 client_version，不再写死旧版本。
+func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
+	p := c.deviceProfile()
 	now := time.Now().UnixMilli()
 	return map[string]any{
-		"timezone":     "Asia/Shanghai",
+		"timezone":     p.Timezone,
 		"reportDelay":  2000,
 		"userId":       a.UID,
 		"username":     a.Nickname,
@@ -70,16 +62,16 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"commit":       "5f9692923c93033111c51ad7b003eb80204a9b75",
 		"ideName":      "WorkBuddy",
 		"ideType":      "WorkBuddy",
-		"ideVersion":   "5.5.6",
-		"machineId":    deriveID(a, "machine"),
-		"sessionId":    deriveID(a, "session"),
+		"ideVersion":   c.clientVersion(),
+		"machineId":    p.MachineID,
+		"sessionId":    p.SessionID,
 		"extName":      "workbuddy-desktop",
-		"extVersion":   "5.5.6",
-		"os":           "win32",
-		"arch":         "x64",
-		"osVersion":    "10.0.26220",
-		"cpuCores":     20,
-		"memorySize":   24,
+		"extVersion":   c.clientVersion(),
+		"os":           p.OS,
+		"arch":         p.Arch,
+		"osVersion":    p.OSVersion,
+		"cpuCores":     p.CPUCores,
+		"memorySize":   p.MemoryGB,
 		"timestamp":    now,
 		"presentAt":    now,
 	}
@@ -92,7 +84,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	if len(events) == 0 {
 		return fmt.Errorf("desktop report: no events")
 	}
-	fp := desktopFingerprint(a)
+	fp := c.desktopFingerprint(a)
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
@@ -115,12 +107,19 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Domain", c.desktopBase(a))
-	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-Request-ID", deriveID(a, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
+	req.Header.Set("User-Agent", c.userAgent(a))
+	// X-Domain 是 host，不是完整 URL（对齐抓包样本 copilot.tencent.com）。
+	req.Header.Set("X-Domain", v3ConfigDomain(a, c.chatBase(a)))
+	req.Header.Set("X-Request-ID", NewUUID())
+	c.injectDeviceHeaders(req)
+	c.injectAttribution(req)
+	c.injectDeviceToken(req, a)
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
+	}
+	if a.EnterpriseID != "" {
+		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
+		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
 	}
 	_, err = c.doJSON(req)
 	return err
@@ -216,8 +215,12 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("User-Agent", c.userAgent(a))
+	req.Header.Set("X-Domain", v3ConfigDomain(a, c.chatBase(a)))
+	req.Header.Set("X-Request-ID", NewUUID())
+	c.injectDeviceHeaders(req)
+	c.injectAttribution(req)
+	c.injectDeviceToken(req, a)
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -260,16 +263,27 @@ func DesktopAutomationCreateEvent(name string) DesktopEvent {
 	}
 }
 
+// webBrowserUA 按宿主 OS 返回浏览器形态 UA（web 事件用）。Chrome 版本沿用
+// 现有抓包值；只切换平台段，避免 macOS 上伪装成 Windows 浏览器。
+func webBrowserUA(p *DeviceProfile) string {
+	const chrome = "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+	if p != nil && p.OS == "darwin" {
+		return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " + chrome
+	}
+	return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " + chrome
+}
+
 // ReportWebEvent 以 Web 端指纹向 www.workbuddy.cn/v2/report 上报单事件。
 // 与桌面指纹（copilot 域）不同：web 域事件是浏览器形状（os/machineId/userAgent），
 // 用于 Library_read 等页面行为类任务（实测 library_doc_intro_click 4 秒点亮）。
 func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, elementName string) error {
-	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+	p := c.deviceProfile()
+	ua := webBrowserUA(p)
 	ev := map[string]any{
 		"eventCode": eventCode, "timestamp": time.Now().UnixMilli(), "reportDelay": 0,
 		"pageURL": pageURL, "elementId": elementID, "elementName": elementName,
-		"os": "Win32", "arch": "", "osVersion": "10.0", "userAgent": ua,
-		"machineId": deriveID(a, "webmachine"), "userId": a.UID,
+		"os": p.OS, "arch": p.Arch, "osVersion": p.OSVersion, "userAgent": ua,
+		"machineId": p.MachineID, "userId": a.UID,
 		"userNickname": a.Nickname, "enterpriseId": a.EnterpriseID,
 	}
 	raw, err := json.Marshal([]map[string]any{ev})
@@ -287,6 +301,9 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	req.Header.Set("Origin", c.webBase(a))
 	req.Header.Set("Referer", pageURL)
 	req.Header.Set("User-Agent", ua)
+	req.Header.Set("X-Domain", v3ConfigDomain(a, c.webBase(a)))
+	c.injectDeviceHeaders(req)
+	c.injectDeviceToken(req, a)
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -296,7 +313,7 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 
 // ---------------------------------------------------------------------------
 // 2026-09-12 第五轮：客户端 asar 逆向 + Sunny 真实样本驱动的新判据（三账号实测点亮）。
-// 来源：WorkBuddy.exe 5.5.6 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
+// 来源：WorkBuddy 桌面端 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
 // （data/desktop-task-protocol.md §7.3）。
 // ---------------------------------------------------------------------------
 
@@ -393,9 +410,11 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Domain", c.chatBase(a))
-	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("User-Agent", c.userAgent(a))
+	req.Header.Set("X-Domain", v3ConfigDomain(a, c.chatBase(a)))
+	c.injectDeviceHeaders(req)
+	c.injectAttribution(req)
+	c.injectDeviceToken(req, a)
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -433,26 +452,21 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	if err != nil {
 		return "", "", err
 	}
+	// 与主聊天路径同一套出站管线（thinking / effort / tool 配对 / 指纹清洗 /
+	// prompt_cache_key），不要在这里维护第二套“桌面客户端”。
+	raw = c.prepareBody(raw, a.Realm(), a.UID, conversationID)
 	req, err := http.NewRequest(http.MethodPost, c.chatBase(a)+"/v2/chat/completions", bytes.NewReader(raw))
 	if err != nil {
 		return "", "", err
 	}
+	// 统一走 ChatHeaders：单设备头、会话头族、traceparent/B3、X-Product=SaaS、
+	// X-IDE-*、X-Agent-Intent/Purpose、device token 全部继承。
+	c.ChatHeaders(req, a, "", ChatMeta{
+		ConversationID:        conversationID,
+		ConversationRequestID: NewUUID(),
+	})
 	h := req.Header
-	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	h.Set("Content-Type", "application/json")
-	h.Set("Accept", "text/event-stream")
-	h.Set("User-Agent", desktopUA)
-	h.Set("X-Domain", c.chatBase(a))
-	h.Set("X-Product", "SaaS")
-	h.Set("X-User-Id", a.UID)
-	h.Set("X-Conversation-ID", conversationID)
-	h.Set("X-Request-ID", fmt.Sprintf("%d", time.Now().UnixNano()))
-	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")
-	h.Set("X-IDE-Name", "WorkBuddy")
-	h.Set("X-IDE-Type", "WorkBuddy")
-	h.Set("X-IDE-Version", "5.5.6")
-	h.Set("x-codebuddy-request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)
 	}
@@ -462,7 +476,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 			fmt.Printf("[dbg] %s: %s\n", k, req.Header.Get(k))
 		}
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.chatHTTP().Do(req)
 	if err != nil {
 		return "", "", err
 	}

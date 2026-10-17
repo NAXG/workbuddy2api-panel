@@ -3,8 +3,6 @@
 package upstream
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"strings"
 
@@ -14,12 +12,12 @@ import (
 
 const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.5.4）。
+	// 白名单头组的 X-IDE-Version）。对齐本机 WorkBuddy Desktop 5.8.3。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.5.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.137.1）。
+	defaultClientVersion = "5.8.3"
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐随包 CLI（2.161.0）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.137.1"
+	defaultCliVersion = "2.161.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -115,32 +113,17 @@ func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
 	}
 }
 
-// deriveAccountStableID 按 uid + 用途盐稳定派生 36 hex 设备/会话标识。
-// 跨重启稳定（固定盐 "wb2a:"，不随进程换——这是与 session 包派生盐的本质差异：
-// 那是会话键维度的进程级随机盐，重启换新；本函数是账号维度，必须跨重启恒定）、
-// 账号间互异（uid 不同则不同）、同 uid 同用途恒同值（幂等）。用 sha256 与项目
-// 既有派生（session/ids.go、cache_key.go）保持一致；截 36 hex 提供更长熵。
-//
-// 两个用途：
-//   - purpose="machine" → X-Machine-ID（设备级，跨会话稳定）
-//   - purpose="session" → X-Session-ID（账号固定会话，跨重启稳定）
-//
-// 与 injectDeviceToken 的 X-Device-Token 并存不冲突：那是登录时上游签发的
-// 真实设备令牌（有则发，权威）；本对头是「每账号一台固定虚拟设备」的稳定指纹，
-// 防多号被上游按设备指纹缺失/漂移关联风控。两者是不同头族，官方桌面端都发。
-func deriveAccountStableID(uid, purpose string) string {
-	sum := sha256.Sum256([]byte("wb2a:" + purpose + ":" + uid))
-	return hex.EncodeToString(sum[:18]) // 36 hex chars
-}
-
-// injectAccountStableHeaders 在 req 注入 X-Machine-ID / X-Session-ID：按 uid 稳定
-// 派生，跨重启固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
-func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
-	if a == nil || a.UID == "" {
+// injectDeviceHeaders 注入单设备（host）身份头。WorkBuddy 5.8.3 的
+// clientInfoProvider 里 machineId = 宿主硬件 UUID、sessionId = 进程级 randomUUID，
+// 同一台设备上的所有账号共享（不是按账号派生）。见 device.go / data/device.json。
+// 不依赖 uid：匿名/未登录请求也发送同一设备身份。
+func (c *Client) injectDeviceHeaders(req *http.Request) {
+	if c == nil || req == nil {
 		return
 	}
-	req.Header.Set("X-Machine-ID", deriveAccountStableID(a.UID, "machine"))
-	req.Header.Set("X-Session-ID", deriveAccountStableID(a.UID, "session"))
+	p := c.deviceProfile()
+	req.Header.Set("X-Machine-ID", p.MachineID)
+	req.Header.Set("X-Session-ID", p.SessionID)
 }
 
 // CommonHeaders 设置所有 API 共享的请求头。
@@ -159,10 +142,12 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
 	// 发对应语言标识，对齐避免上游风控按语言缺失误判。
 	req.Header.Set("Accept-Language", acceptLanguageFor(a))
-	// X-Machine-ID / X-Session-ID：按 uid 稳定派生的账号级设备头（见
-	// injectAccountStableHeaders）。注入在 CommonHeaders——chat 经 ChatHeaders
-	// 叠加 CommonHeaders 天然继承；billing 域另行注入，全出站覆盖。
-	c.injectAccountStableHeaders(req, a)
+	// X-Machine-ID / X-Session-ID：单设备身份头（见 injectDeviceHeaders），
+	// 同一台机器上的所有账号共享。chat 经 ChatHeaders 继承；billing 域另行注入。
+	c.injectDeviceHeaders(req)
+	// WorkBuddy 5.8.3 的网关请求显式 Accept-Encoding: identity；Go 默认会加 gzip，
+	// 这里对齐客户端，避免多一个可识别的传输层差异（响应不压缩）。
+	req.Header.Set("Accept-Encoding", "identity")
 }
 
 // acceptLanguageFor 按账号 realm 返回 Accept-Language：global → en-US，cn → zh-CN。
@@ -260,38 +245,43 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 //     透传客户端原值优先，客户端没给就不伪造，避免误导后台建错会话。
 //   - X-Conversation-Request-ID：**对话轮级聚合主键**，必发。一次 user send 内的
 //     所有 tool call/重试/换号/降级复用同一个 → 后台按它聚合成一条（不再碎片化）。
-//   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex）。
+//   - X-Conversation-Message-ID / X-Request-ID：消息级/请求级，各 randomUUID()
+//     （36 字符带连字符，对齐 5.8.3 applyGatewayHeaders）。
 //   - X-Root-Request-ID：= conversationRequestID（根请求追踪）。
-//   - X-Trace-ID：入站透传或 = conversationRequestID。
-//   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
-//     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
-//     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
+//   - traceparent / b3 / X-B3-TraceId / X-B3-ParentSpanId / X-B3-SpanId /
+//     X-B3-Sampled：同源链路族，32 hex TraceId + 16 hex SpanId/ParentSpanId。
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {
-		// 零值 meta（直接调 ChatHeaders 的调用方/测试）也要保证聚合主键必发：
-		// 本级补一个 32 hex，调用方（handler）已生成稳定的不走到这里。
-		convReqID = session.NewMessageID()
+		// 零值 meta（直接调 ChatHeaders 的调用方/测试）也要保证聚合主键必发。
+		convReqID = NewUUID()
 	}
-	messageID := session.NewMessageID()
+	// WorkBuddy 5.8.3 的 applyGatewayHeaders 对消息级/请求级 ID 使用 randomUUID()
+	// （36 字符带连字符），B3/traceparent 才用 32/16 hex。两者不要混用。
+	messageID := NewUUID()
+	requestID := NewUUID()
 	if meta.ConversationID != "" {
 		req.Header.Set("X-Conversation-ID", meta.ConversationID)
 	}
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
 	req.Header.Set("X-Conversation-Message-ID", messageID)
-	req.Header.Set("X-Request-ID", messageID)
+	req.Header.Set("X-Request-ID", requestID)
 	req.Header.Set("X-Root-Request-ID", convReqID)
+
+	// 链路族：traceparent / b3 与 X-B3-* 同源。入站 X-Trace-ID 仅在其为 32 hex
+	// 时复用（traceparent 要求 32 hex）；否则本请求新生成，避免把非法值扩散到 B3。
 	traceID := meta.TraceID
-	if traceID == "" {
-		traceID = convReqID
+	if len(traceID) != 32 || !validTraceID(traceID) {
+		traceID = session.NewMessageID()
 	}
+	spanID := session.NewMessageID()[:16]
+	parentSpanID := session.NewMessageID()[:16]
 	req.Header.Set("X-Trace-ID", traceID)
-	b3Trace := convReqID
-	if !validTraceID(b3Trace) {
-		b3Trace = messageID // 非法 B3 TraceId → 回落恒 32 hex 的消息级 ID
-	}
-	req.Header.Set("X-B3-TraceId", b3Trace)
-	req.Header.Set("X-B3-SpanId", messageID[:16])
+	req.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
+	req.Header.Set("b3", traceID+"-"+spanID+"-1-"+parentSpanID)
+	req.Header.Set("X-B3-TraceId", traceID)
+	req.Header.Set("X-B3-ParentSpanId", parentSpanID)
+	req.Header.Set("X-B3-SpanId", spanID)
 	req.Header.Set("X-B3-Sampled", "1")
 }
 
@@ -320,13 +310,13 @@ func (c *Client) attributionClientName() string {
 	return "WorkBuddy"
 }
 
-// injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product）。
-// 仅在 chat/completions 路径生效（ChatHeaders 调用）。
+// injectAttribution 注入用量归属头（X-Agent-Purpose / X-Agent-Intent / X-IDE-* /
+// X-Product / X-Private-Data）。仅在 chat/completions 路径生效（ChatHeaders 调用）。
 //
-// 默认（ClientName 空）即对齐官方 WorkBuddy 桌面端指纹：X-Agent-Purpose="conversation"
-// + X-IDE-Name/Type/Product="WorkBuddy" + X-IDE-Version=client_version，上游用量归因
-// 不再出现 client/agentPurpose 为空的「网关特征」。显式 ClientName="SaaS" 还原旧行为
-// （仅 X-Product="SaaS"，不设 X-IDE-*）；配其他值则四头跟随该值。
+// 对齐 WorkBuddy 5.8.3 的 applyGatewayHeaders：X-Agent-Purpose="conversation"、
+// X-Agent-Intent="craft"、X-IDE-Name/Type="WorkBuddy"、X-IDE-Version=client_version、
+// X-Product="SaaS"（部署形态，不是 IDE 名）、X-Private-Data="true"。
+// 显式 ClientName="SaaS" 保留旧的最小头组；其他值只覆盖 X-IDE-Name/Type。
 func (c *Client) injectAttribution(req *http.Request) {
 	name := c.attributionClientName()
 	if name == "SaaS" {
@@ -334,10 +324,12 @@ func (c *Client) injectAttribution(req *http.Request) {
 		return
 	}
 	req.Header.Set("X-Agent-Purpose", "conversation")
+	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
 	req.Header.Set("X-IDE-Version", c.clientVersion())
-	req.Header.Set("X-Product", name)
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("X-Private-Data", "true")
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
@@ -369,14 +361,17 @@ func ExtractClientIP(r *http.Request) string {
 	return ""
 }
 
-// BillingHeaders billing 接口请求头。
-// UA 语义：默认**不设置**（保持现状，Go 客户端自带默认 UA）；仅当显式配置
-// c.UserAgent 非空才覆盖——避免默认路径给 billing 引入新的 UA 指纹。
+// BillingHeaders billing / growth / report 接口请求头。
+// 对齐 WorkBuddy 5.8.3：默认 billing UA 单段 WorkBuddy/<ver>；同时补上 chat
+// 路径已有的单设备头（X-Machine-ID / X-Session-ID）与桌面端归属头，避免同一账号
+// 在 chat 与 billing 上出现两套设备/产品指纹。
 func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	// AccessToken 加锁快照（同 ChatHeaders：keepalive 可在 a.mu 内改写）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Accept-Encoding", "identity")
 	c.injectCodeBuddyRequest(req)
 	// Accept-Language 按 realm 切（D5，billing 域未走 CommonHeaders，单独注入）。
 	req.Header.Set("Accept-Language", acceptLanguageFor(a))
@@ -385,6 +380,14 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	} else if ua := c.billingUA(); ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
+	// 单设备身份（同一台机器上的所有账号共享）。
+	c.injectDeviceHeaders(req)
+	// 桌面端归属头：billing 域同样带，避免只有 chat 有 X-IDE-*。
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("X-Private-Data", "true")
+	req.Header.Set("X-IDE-Name", "WorkBuddy")
+	req.Header.Set("X-IDE-Type", "WorkBuddy")
+	req.Header.Set("X-IDE-Version", c.clientVersion())
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}

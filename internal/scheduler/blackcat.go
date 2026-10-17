@@ -3,6 +3,7 @@
 package scheduler
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -17,13 +18,21 @@ import (
 // 只有 CI 恰好落在 UTC 夜里才真正执行。属典型的「随环境静默失效」的测试。
 var nowForNightWindow = time.Now
 
-// RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。
+// RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过；面板/测试手动触发）。
 // 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验 InNightWindow。
+// 排程触发走 runBlackcat(ctx, slot, true)：按账号确定性打散。
 func (s *Scheduler) RunBlackcatNow() {
+	s.runBlackcat(context.Background(), time.Time{}, false)
+}
+
+// runBlackcat 夜猫子遍历；spread=true 用 planSlots 的账号偏移替代固定限速。
+func (s *Scheduler) runBlackcat(ctx context.Context, slot time.Time, spread bool) {
 	if !upstream.InNightWindow(nowForNightWindow()) {
 		log.Printf("blackcat: 当前不在 23:00–08:00 计数窗口，跳过")
 		return
 	}
+
+	var uids []string
 	for _, st := range s.cfg.Pool.List() {
 		// 暂停选号（paused）账号跳过：夜猫子是全任务体系中唯一「整任务都是
 		// 真实模型对话」的（RunNightChats 逐条 ChatStream 发 glm-5.2 短对话），
@@ -41,6 +50,17 @@ func (s *Scheduler) RunBlackcatNow() {
 		if a.IsEnterprise() {
 			continue // 企业版门控：无成长体系（growth 403 / claim-gift 400「企业账号不支持该操作」）
 		}
+		uids = append(uids, st.UID)
+	}
+
+	for _, ps := range planSlots(uids, slot, taskBlackcat, spread) {
+		if spread && !waitWall(ctx, ps.at) {
+			return
+		}
+		a := s.cfg.Pool.AuthByUID(ps.uid)
+		if a == nil {
+			continue
+		}
 		need, err := s.cfg.Upstream.BlackcatNeed(a)
 		if err != nil {
 			log.Printf("blackcat %s: %v", logfmt.Label(a.UID, a.Nickname), err)
@@ -55,6 +75,8 @@ func (s *Scheduler) RunBlackcatNow() {
 			continue
 		}
 		log.Printf("blackcat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.Nickname), ok)
-		time.Sleep(activityAccountDelay)
+		if !spread {
+			time.Sleep(activityAccountDelay)
+		}
 	}
 }

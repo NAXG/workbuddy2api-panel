@@ -3,6 +3,7 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -41,13 +42,19 @@ func travelDay(t time.Time) string {
 	return t.In(cstZone).Format("2006-01-02")
 }
 
-// RunTravelNow 立即对池内所有可用账号执行一趟旅行巡检。
+// RunTravelNow 立即对池内所有可用账号执行一趟旅行巡检（面板/测试手动触发）。
+// 排程触发走 runTravel(ctx, slot, true)：按账号确定性打散，不再 9/21 点齐发。
 // 禁用账号跳过；暂停选号（paused）账号照常参与——旅行是纯 RPC（状态/派出/
 // 领奖 + 领养前置上报），不发模型对话，与「让位防风控」不冲突；
 // 401/查询失败只跳过该账号本轮（不强刷 token，交 22:00 keepalive）；
-// 账号间限速 travelAccountDelay。
+// 手动路径账号间限速 travelAccountDelay。
 func (s *Scheduler) RunTravelNow() {
-	first := true
+	s.runTravel(context.Background(), time.Time{}, false)
+}
+
+// runTravel 旅行巡检遍历；spread=true 用 planSlots 的账号偏移替代固定限速。
+func (s *Scheduler) runTravel(ctx context.Context, slot time.Time, spread bool) {
+	var uids []string
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -62,10 +69,25 @@ func (s *Scheduler) RunTravelNow() {
 		if a.IsEnterprise() {
 			continue // 企业版门控：无成长体系（/activity/growth/* 上游一律 403），不发起任何上游调用
 		}
-		if !first {
-			time.Sleep(travelAccountDelay)
+		uids = append(uids, st.UID)
+	}
+
+	first := true
+	for _, ps := range planSlots(uids, slot, taskTravel, spread) {
+		if spread {
+			if !waitWall(ctx, ps.at) {
+				return
+			}
+		} else if !first {
+			if !sleepCtx(ctx, travelAccountDelay) {
+				return
+			}
 		}
 		first = false
+		a := s.cfg.Pool.AuthByUID(ps.uid)
+		if a == nil {
+			continue
+		}
 		s.travelOne(a)
 	}
 }

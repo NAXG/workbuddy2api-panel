@@ -1345,6 +1345,15 @@ func TestStatusRequiresAuth(t *testing.T) {
 	}
 }
 
+// TestNewHandlerDefaultPromptModePassthrough 裸用 Handler 的缺省提示词模式必须与
+// config.Default() 同口径（passthrough）；此前回退 custom，导致库/测试路径与生产配置漂移。
+func TestNewHandlerDefaultPromptModePassthrough(t *testing.T) {
+	h := NewHandler(Config{})
+	if h.cfg.PromptMode != "passthrough" {
+		t.Fatalf("PromptMode=%q want passthrough (align with config.Default)", h.cfg.PromptMode)
+	}
+}
+
 // TestContentBlockedTriggersDegradedRetry passthrough 模式下首请求 400（11128 文案）
 // → 降级重试（Degraded）→ 200，客户端无感。验证第二次出站 body 为 Degraded。
 func TestContentBlockedTriggersDegradedRetry(t *testing.T) {

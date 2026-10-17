@@ -132,6 +132,16 @@ func main() {
 	}
 
 	up := upstream.New()
+	// 单设备身份档案：一台机器多账号共享 machineId / OS / 硬件指纹。
+	// 默认 data/device.json（随 data/ 挂载）；缺失时生成随机 machineId 并落盘。
+	devicePath := stateSibling(cfg.StateFile, "device.json")
+	if prof, derr := upstream.LoadOrCreateDeviceProfile(devicePath); derr != nil {
+		log.Printf("WARN: [upstream] device profile %s: %v (using runtime fallback)", devicePath, derr)
+	} else {
+		up.DeviceProfile = prof
+		log.Printf("[upstream] device profile: %s (%s/%s, %d cores, %d GB)",
+			devicePath, prof.OS, prof.Arch, prof.CPUCores, prof.MemoryGB)
+	}
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿

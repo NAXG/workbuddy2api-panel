@@ -51,7 +51,7 @@ type Config struct {
 	// nil 时回退静态字段（测试与裸用场景）。
 	Live *livecfg.Holder
 
-	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
+	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传，缺省）。
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
@@ -132,7 +132,9 @@ func NewHandler(cfg Config) *Handler {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	if cfg.PromptMode == "" {
-		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
+		// 缺省 passthrough：与 config.Default()/normalizePrompt() 同口径（透传客户端 system）。
+		// 此前这里回退 custom，导致裸用 Handler 的路径与配置默认漂移。
+		cfg.PromptMode = "passthrough"
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))

@@ -32,9 +32,10 @@ func (c *Client) schoolJSON(a *auth.Auth, method, path string, body map[string]a
 	if err != nil {
 		return err
 	}
+	// 学院/开学季接口此前是唯一不设 UA 的路径（Go 默认 Go-http-client/1.1）。
+	// 统一走 CommonHeaders：完整 WorkBuddy UA、Origin/Referer、设备头、语言头。
+	c.CommonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -59,7 +60,10 @@ const mpReportPath = "/v2/report"
 const schoolOpenDayActivityID = "school_open_day_2026"
 
 // mpEventBase 小程序埋点公共指纹（appservice wQ()+Ao() 对齐）。
-func mpEventBase(a *auth.Auth) map[string]any {
+// machineId/OS/硬件来自单设备档案：同一台机器上的所有账号共享，不再写死一个
+// 抓包设备 UUID（此前所有账号都是同一台“假手机”，比不填更异常）。
+func (c *Client) mpEventBase(a *auth.Auth) map[string]any {
+	p := c.deviceProfile()
 	return map[string]any{
 		"timestamp":    time.Now().UnixMilli(),
 		"ideType":      "WorkBuddy_MP",
@@ -69,11 +73,11 @@ func mpEventBase(a *auth.Auth) map[string]any {
 		"product":      "SaaS",
 		"ideName":      "wx_app_cloud",
 		"platform":     "mini_program",
-		"os":           "windows",
-		"osVersion":    "11",
-		"arch":         "x64",
-		"machineId":    "0655736a-607f-4d9d-b430-58176ee9a090",
-		"timezone":     "Asia/Shanghai",
+		"os":           p.OS,
+		"osVersion":    p.OSVersion,
+		"arch":         p.Arch,
+		"machineId":    p.MachineID,
+		"timezone":     p.Timezone,
 		"userId":       a.UID,
 		"userNickname": a.Nickname,
 	}
@@ -84,7 +88,7 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	if len(events) == 0 {
 		return fmt.Errorf("mp report: no events")
 	}
-	base := mpEventBase(a)
+	base := c.mpEventBase(a)
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
@@ -100,13 +104,18 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BillingBaseCN+mpReportPath, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+mpReportPath, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
+	// 小程序上报同样必须有 UA；此前缺失时实际发的是 Go-http-client/1.1。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent(a))
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	c.injectDeviceHeaders(req)
+	c.injectDeviceToken(req, a)
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}

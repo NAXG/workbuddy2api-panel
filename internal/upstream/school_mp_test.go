@@ -10,7 +10,8 @@ import (
 
 func TestMPEventBase(t *testing.T) {
 	a := &auth.Auth{UID: "u-1", Nickname: "测试"}
-	base := mpEventBase(a)
+	c := &Client{}
+	base := c.mpEventBase(a)
 	for _, k := range []string{"ideType", "extName", "ideName", "platform", "userId"} {
 		if _, ok := base[k]; !ok {
 			t.Errorf("missing common field %s", k)
@@ -34,4 +35,3 @@ func TestSchoolChatTimesEvents(t *testing.T) {
 		t.Error("agentName missing")
 	}
 }
-

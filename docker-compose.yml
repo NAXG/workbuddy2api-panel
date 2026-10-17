@@ -1,6 +1,7 @@
 services:
   wb2api:
-    build: .
+    # 用 CI 发布的镜像：升级 = docker compose pull && docker compose up -d（不再本地构建）
+    image: ghcr.io/linguo2625469/workbuddy2api-panel:latest
     container_name: workbuddy2api
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
@@ -14,7 +15,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
     ports:
-      - "7863:7863"
+      - "127.0.0.1:7863:7863"
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data

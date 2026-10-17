@@ -64,6 +64,10 @@ type Config struct {
 	} `json:"cooldown"`
 
 	Schedule struct {
+		// 小时是「目标时点」，实际触发会叠加确定性抖动：同一 (自然日, 小时)
+		// 在整点后 0–7 分钟内取偏移（scheduler.slotJitterWindow），同一任务族内
+		// 账号再按 0–10 分钟打散（scheduler.accountSpreadWindow）。避免多账号
+		// 部署在整点同秒齐发、固定顺序、固定间隔。
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
 		TravelHours    []int `json:"travel_hours"`    // [9,21]
 		ActivityHours  []int `json:"activity_hours"`  // [10]
@@ -133,12 +137,12 @@ type Config struct {
 		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
 		UserAgent string `json:"user_agent"`
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
-		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
+		// X-IDE-Version）。空 = 内置默认（对齐本机 WorkBuddy 5.8.3）。
 		ClientVersion string `json:"client_version"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（随包 CLI 2.161.0）。
 		CliVersion string `json:"cli_version"`
-		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
-		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
+		// ClientName 用量归属名（X-IDE-Name / X-IDE-Type；空 = WorkBuddy）。
+		// X-Product 恒为部署形态 SaaS；显式 "SaaS" 保留最小头组（仅 X-Product）。
 		ClientName string `json:"client_name"`
 		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。
 		// 每号 auth 文件的 device_token 键优先于本项。

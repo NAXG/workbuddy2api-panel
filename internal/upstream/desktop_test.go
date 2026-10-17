@@ -40,8 +40,8 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("report desktop: %v", err)
 	}
-	if gotUA != desktopUA {
-		t.Errorf("UA=%q want %q", gotUA, desktopUA)
+	if gotUA != defaultUAString {
+		t.Errorf("UA=%q want %q", gotUA, defaultUAString)
 	}
 	if len(got) != 1 {
 		t.Fatalf("events=%d want 1", len(got))
@@ -62,7 +62,13 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if ev["mode"] != "craft" {
 		t.Errorf("业务字段 mode=%v 被指纹覆盖或缺失", ev["mode"])
 	}
-	// machineId 应为 uid 稳定派生（36 hex）。
+	// machineId/sessionId 来自单设备档案（UUID 形态，36 字符带连字符）。
+	if got := ev["machineId"].(string); got != c.machineID() {
+		t.Errorf("machineId=%q want shared %q", got, c.machineID())
+	}
+	if got := ev["sessionId"].(string); got != c.sessionID() {
+		t.Errorf("sessionId=%q want shared %q", got, c.sessionID())
+	}
 	if len(ev["machineId"].(string)) != 36 {
 		t.Errorf("machineId 长度=%d want 36", len(ev["machineId"].(string)))
 	}
@@ -102,8 +108,8 @@ func TestSetAppearanceTheme(t *testing.T) {
 		if r.URL.Path != "/v2/user-asset/appearance/set" {
 			t.Errorf("path=%s want /v2/user-asset/appearance/set", r.URL.Path)
 		}
-		if r.Header.Get("User-Agent") != desktopUA {
-			t.Errorf("UA=%q want desktop UA", r.Header.Get("User-Agent"))
+		if r.Header.Get("User-Agent") != defaultUAString {
+			t.Errorf("UA=%q want %q", r.Header.Get("User-Agent"), defaultUAString)
 		}
 		raw, _ := io.ReadAll(r.Body)
 		json.Unmarshal(raw, &got)
