@@ -222,7 +222,9 @@ flowchart LR
 
 ### 方式〇：GHCR 镜像（免克隆免构建）
 
-CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径：
+CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径。
+
+> 这里指**已发布版本**的镜像；本仓库当前源码（含未发布改动）请用下面的「方式一：Docker Compose」从源码构建。本 fork 发布自己的镜像后，把命令里的 `linguo2625469` 换成 `naxg` 即可。
 
 ```bash
 # 1. 准备配置与数据目录
@@ -249,16 +251,15 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+git clone https://github.com/NAXG/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
 cp config.example.json config.json
 #    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
 
-# 3. 启动（compose 使用 GHCR 镜像，首次自动拉取）
-docker compose pull
-docker compose up -d
+# 3. 启动（从当前源码构建本地镜像）
+docker compose up -d --build
 
 # 4. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
@@ -270,11 +271,14 @@ curl -s http://localhost:7863/healthz
 常用运维命令：
 
 ```bash
-docker compose pull             # 拉取最新 GHCR 镜像（升级）
+git pull                        # 更新源码
+docker compose up -d --build    # 重新构建并重启（升级）
 docker compose logs -f          # 跟踪日志
 docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
+
+> 该 compose 默认本地构建，不使用 `docker compose pull`；升级走上面的 `git pull && docker compose up -d --build`。
 
 ### 方式二：Windows 单文件运行（无需 Docker）
 
@@ -867,9 +871,9 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **发布产物**：推送 `v*` tag 时，CI 构建五平台二进制（`.zip` / `.tar.gz`）并发布 GitHub Release，附 `checksums.txt`；`main` / tag 同时发布多架构 GHCR 镜像（`ghcr.io/linguo2625469/workbuddy2api-panel`）
+- **发布产物**：推送 `v*` tag 时，CI 构建五平台二进制（`.zip` / `.tar.gz`）并发布 GitHub Release，附 `checksums.txt`；`main` / tag 同时发布多架构 GHCR 镜像（`ghcr.io/<owner>/workbuddy2api-panel`）
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **校验与构建来源**：Go 模块依赖由 `go.sum` 约束；Release 二进制附 SHA-256 校验和；镜像由本仓库 CI 使用仓库内 `Dockerfile` 构建并发布，`docker-compose.yml` 默认拉取该镜像（也可改回 `build: .` 本地构建）
+- **校验与构建来源**：Go 模块依赖由 `go.sum` 约束；Release 二进制附 SHA-256 校验和；镜像由本仓库 CI 使用仓库内 `Dockerfile` 构建并发布。`docker-compose.yml` 默认 `build: .` 从当前源码构建本地镜像；使用已发布 GHCR 镜像时按「方式〇」直接 `docker run`
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界

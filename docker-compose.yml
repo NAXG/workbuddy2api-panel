@@ -1,7 +1,9 @@
 services:
   wb2api:
-    # 用 CI 发布的镜像：升级 = docker compose pull && docker compose up -d（不再本地构建）
-    image: ghcr.io/linguo2625469/workbuddy2api-panel:latest
+    # 默认从当前源码构建本地镜像：docker compose up -d --build
+    # 使用已发布的 GHCR 镜像时，见 README「方式〇」直接 docker run，或自行改写本服务。
+    build: .
+    image: workbuddy2api-panel:local
     container_name: workbuddy2api
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
